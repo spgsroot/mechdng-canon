@@ -7,3 +7,10 @@ The DNG file is saved alongside Canon's native CR2/JPEG in the DCIM folder.
 |                       RAW                        | DNG |
 |:--------------------------------------------------------:|:---:|
 | <img src="repo/raw.jpg" alt="Main Screen"/> | <img src="repo/dng.jpg" alt="Gallery"/> |
+
+```
+// build
+cd modules/mechdng
+make clean   
+make
+```
