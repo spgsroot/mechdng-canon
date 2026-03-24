@@ -40,6 +40,12 @@ struct mechdng_exif {
     int focal_len;          /* focal length in mm */
     char lens_name[32];     /* lens model string */
     char datetime[20];      /* "YYYY:MM:DD HH:MM:SS\0" */
+    int wb_r_num;           /* AsShotNeutral R: num/den */
+    int wb_r_den;
+    int wb_g_num;           /* AsShotNeutral G: always 1/1 */
+    int wb_g_den;
+    int wb_b_num;           /* AsShotNeutral B: num/den */
+    int wb_b_den;
 };
 
 /* Convert raw APEX ISO (1/8 EV) to linear ISO value */
@@ -99,6 +105,35 @@ static int raw_aperture_to_x10(int raw)
     return fnum_x10[stops];
 }
 
+/**
+ * Compute AsShotNeutral from WB preset mode.
+ * Values are approximate 1/multiplier for 5D3 sensor, G normalized to 1.0.
+ * Measured from 5D3 CR2 WB tags at each preset.
+ */
+static void wb_preset_to_neutral(int wb_mode, int* r_num, int* r_den,
+                                               int* b_num, int* b_den)
+{
+    *r_den = 1000000;
+    *b_den = 1000000;
+
+    switch (wb_mode) {
+        case 1:  /* Sunny ~5200K */
+            *r_num = 459000; *b_num = 640000; break;
+        case 2:  /* Cloudy ~6000K */
+            *r_num = 420000; *b_num = 710000; break;
+        case 3:  /* Tungsten ~3200K */
+            *r_num = 620000; *b_num = 380000; break;
+        case 4:  /* Fluorescent ~4000K */
+            *r_num = 530000; *b_num = 480000; break;
+        case 5:  /* Flash ~6000K */
+            *r_num = 425000; *b_num = 700000; break;
+        case 8:  /* Shade ~7000K */
+            *r_num = 390000; *b_num = 760000; break;
+        default: /* Auto / Daylight ~5500K fallback */
+            *r_num = 473635; *b_num = 624000; break;
+    }
+}
+
 /* Capture current exposure metadata from lens_info + RTC */
 static void mechdng_capture_exif(struct mechdng_exif* exif)
 {
@@ -116,6 +151,32 @@ static void mechdng_capture_exif(struct mechdng_exif* exif)
              "%04d:%02d:%02d %02d:%02d:%02d",
              now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
              now.tm_hour, now.tm_min, now.tm_sec);
+
+    /* White balance → AsShotNeutral {R, G, B} as rationals.
+     * G is always 1/1 (reference channel). */
+    exif->wb_g_num = 1000000;
+    exif->wb_g_den = 1000000;
+
+    if (lens_info.wb_mode == WB_CUSTOM
+        && lens_info.WBGain_R > 0
+        && lens_info.WBGain_G > 0
+        && lens_info.WBGain_B > 0)
+    {
+        /* Variant C: exact multipliers from PROP_CUSTOM_WB.
+         * Canon gains: 1024 = 1.0x.  R gain > G means red is amplified,
+         * so AsShotNeutral_R = G/R (inverse of amplification). */
+        exif->wb_r_num = lens_info.WBGain_G;
+        exif->wb_r_den = lens_info.WBGain_R;
+        exif->wb_b_num = lens_info.WBGain_G;
+        exif->wb_b_den = lens_info.WBGain_B;
+    }
+    else
+    {
+        /* Variant B: approximate from WB preset mode */
+        wb_preset_to_neutral(lens_info.wb_mode,
+                             &exif->wb_r_num, &exif->wb_r_den,
+                             &exif->wb_b_num, &exif->wb_b_den);
+    }
 }
 
 /* =====================================================================
@@ -163,7 +224,7 @@ static const char str_software[] = "Magic Lantern / mechdng";
  *
  * Layout:
  *   [TIFF header 8 bytes]
- *   [IFD0: 24 entries]
+ *   [IFD0: 25 entries]
  *   [EXIF IFD: 6 entries]
  *   [Extra data: strings, rationals, arrays]
  *   [Pad to raw_offset]
@@ -184,7 +245,7 @@ static int build_dng_header(uint8_t* buf, struct raw_info* ri,
     put32(buf+4, 8);           /* offset to IFD0 */
 
     /* --- IFD0 at offset 8 --- */
-    int n_ifd0 = 24;
+    int n_ifd0 = 25;
     uint8_t* ifd = buf + 8;
     put16(ifd, n_ifd0);
     uint8_t* e = ifd + 2;
@@ -284,6 +345,17 @@ static int build_dng_header(uint8_t* buf, struct raw_info* ri,
     ifd_entry(e, 0xC621, T_SRATIONAL, 9, extra);
     memcpy(buf + extra, color_matrix1, 9 * 8);
     extra += 9 * 8;
+    e += 12;
+
+    /* 0xC628: AsShotNeutral — 3 RATIONALs {R, G, B} */
+    ifd_entry(e, 0xC628, T_RATIONAL, 3, extra);
+    put32(buf + extra + 0,  exif->wb_r_num);
+    put32(buf + extra + 4,  exif->wb_r_den);
+    put32(buf + extra + 8,  exif->wb_g_num);
+    put32(buf + extra + 12, exif->wb_g_den);
+    put32(buf + extra + 16, exif->wb_b_num);
+    put32(buf + extra + 20, exif->wb_b_den);
+    extra += 24;
     e += 12;
 
     /* 0xC65A: CalibrationIlluminant1 = 21 (D65) */
